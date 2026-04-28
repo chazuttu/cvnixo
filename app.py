@@ -118,6 +118,14 @@ h1,h2,h3 { font-family: 'Syne', sans-serif !important; }
     transition: all .2s !important;
 }
 .stButton > button:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 25px #6c63ff44 !important; }
+.stDownloadButton > button {
+    background: linear-gradient(135deg,var(--accent),#8b83ff) !important;
+    color: white !important; border: none !important; border-radius: 12px !important;
+    padding: 13px 28px !important; font-family: 'Syne', sans-serif !important;
+    font-weight: 700 !important; font-size: 15px !important; width: 100% !important;
+    transition: all .2s !important;
+}
+.stDownloadButton > button:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 25px #6c63ff44 !important; }
 
 .pricing-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; margin: 1.2rem 0; }
 .plan {
