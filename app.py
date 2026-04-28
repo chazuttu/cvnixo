@@ -3,22 +3,26 @@ import groq
 import pdfplumber
 import requests
 from bs4 import BeautifulSoup
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import io
 import os
 import json
 import re
-import subprocess
-import tempfile
 from datetime import datetime
 
 # ─────────────────────────────────────────────
-# CONFIG — ADD YOUR KEYS HERE
+# CONFIG
 # ─────────────────────────────────────────────
-GROQ_API_KEY     = st.secrets.get("GROQ_API_KEY", "")
-RAZORPAY_BASIC   = st.secrets.get("RAZORPAY_BASIC", "#")
-RAZORPAY_PRO     = st.secrets.get("RAZORPAY_PRO", "#")
-RAZORPAY_YEARLY  = st.secrets.get("RAZORPAY_YEARLY", "#")
-EMAIL_DB_FILE    = "used_emails.json"
+GROQ_API_KEY    = st.secrets.get("GROQ_API_KEY", "")
+RAZORPAY_BASIC  = st.secrets.get("RAZORPAY_BASIC", "#")
+RAZORPAY_PRO    = st.secrets.get("RAZORPAY_PRO", "#")
+RAZORPAY_YEARLY = st.secrets.get("RAZORPAY_YEARLY", "#")
+EMAIL_DB_FILE   = "used_emails.json"
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -156,14 +160,8 @@ h1,h2,h3 { font-family: 'Syne', sans-serif !important; }
 .bar { height:100%; border-radius:100px; background:linear-gradient(90deg,var(--accent),var(--green)); }
 
 .chip { display:inline-block; background:#6c63ff18; border:1px solid #6c63ff33; color:var(--accent); border-radius:100px; padding:3px 10px; font-size:11px; margin:2px; }
-.chip.miss { background:#ff658418; border-color:#ff658433; color:var(--accent2); }
-
 .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:2rem 0; }
-
-.unlock-box {
-    background: var(--card); border: 1px solid #6c63ff33;
-    border-radius: var(--radius); padding: 1.5rem; margin-top: 1rem;
-}
+.unlock-box { background: var(--card); border: 1px solid #6c63ff33; border-radius: var(--radius); padding: 1.5rem; margin-top: 1rem; }
 
 .stRadio > div { gap: 10px !important; }
 .stRadio label { background:var(--surface) !important; border:1px solid var(--border) !important; border-radius:9px !important; padding:9px 14px !important; cursor:pointer !important; transition:all .15s !important; }
@@ -215,9 +213,7 @@ def call_groq(resume_text, jd_text):
     client = groq.Groq(api_key=GROQ_API_KEY)
     prompt = f"""
 You are an expert ATS resume specialist and career coach.
-
 Analyze the resume against the job description carefully.
-
 Return ONLY a JSON object. No text before or after. No markdown. Just pure JSON.
 
 {{
@@ -226,9 +222,9 @@ Return ONLY a JSON object. No text before or after. No markdown. Just pure JSON.
   "phone": "phone from resume or empty string",
   "location": "city from resume or empty string",
   "linkedin": "linkedin url from resume or empty string",
-  "match_score": "number between 5 and 100",
-  "ats_keywords_found": "number of JD keywords found in resume",
-  "ats_keywords_missing": "number of JD keywords missing from resume",
+  "match_score": 75,
+  "ats_keywords_found": 12,
+  "ats_keywords_missing": 5,
   "strong_points": ["point 1","point 2","point 3","point 4","point 5"],
   "missing_skills": ["skill 1","skill 2","skill 3","skill 4"],
   "improvement_tips": ["tip 1","tip 2","tip 3","tip 4"],
@@ -261,7 +257,7 @@ STRICT RULES:
 - Only use information already present in the resume
 - Rewrite bullet points using keywords from the job description
 - Keep all dates company names and institutions exactly as original
-- match_score minimum is 5 never return 0
+- match_score must be a number not a string
 - Return ONLY pure JSON nothing else
 
 RESUME:
@@ -289,31 +285,454 @@ def parse_json(text):
         text = text[start:end]
     return json.loads(text)
 
-def run_node(data, output_dir):
-    """Call generate_resume.js exactly like cvnixo.py does"""
-    js_file = os.path.join(os.path.dirname(__file__), "generate_resume.js")
-    if not os.path.exists(js_file):
-        js_file = "generate_resume.js"
-
-    temp_dir = tempfile.gettempdir()
-    json_path = os.path.join(temp_dir, "cvnixo_data.json")
-
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    result = subprocess.run(
-        ["node", js_file, json_path, output_dir],
-        capture_output=True, text=True
-    )
-    return "SUCCESS" in result.stdout, result.stderr
-
 def simple_ats_score(resume_text, jd_text):
-    jd_words   = set(re.findall(r'\b[a-zA-Z]{4,}\b', jd_text.lower()))
-    res_words  = set(re.findall(r'\b[a-zA-Z]{4,}\b', resume_text.lower()))
-    common     = jd_words & res_words
-    score      = min(int((len(common) / max(len(jd_words), 1)) * 150), 99)
-    missing    = list(jd_words - res_words)[:12]
-    return max(score, 5), missing
+    jd_words  = set(re.findall(r'\b[a-zA-Z]{4,}\b', jd_text.lower()))
+    res_words = set(re.findall(r'\b[a-zA-Z]{4,}\b', resume_text.lower()))
+    common    = jd_words & res_words
+    score     = min(int((len(common) / max(len(jd_words), 1)) * 150), 99)
+    return max(score, 5)
+
+# ─────────────────────────────────────────────
+# DOCUMENT HELPERS
+# ─────────────────────────────────────────────
+
+def set_cell_bg(cell, hex_color):
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd  = OxmlElement('w:shd')
+    shd.set(qn('w:val'),   'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'),  hex_color)
+    tcPr.append(shd)
+
+def set_cell_borders(cell, **kwargs):
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement('w:tcBorders')
+    for side in ['top','left','bottom','right']:
+        tag = OxmlElement(f'w:{side}')
+        tag.set(qn('w:val'),   kwargs.get(side, 'nil'))
+        tag.set(qn('w:sz'),    '0')
+        tag.set(qn('w:space'), '0')
+        tag.set(qn('w:color'), 'auto')
+        tcBorders.append(tag)
+    tcPr.append(tcBorders)
+
+def add_para(doc_or_cell, text, bold=False, size=10, color=None,
+             italic=False, align=None, space_before=0, space_after=60):
+    if hasattr(doc_or_cell, 'add_paragraph'):
+        p = doc_or_cell.add_paragraph()
+    else:
+        p = doc_or_cell.paragraphs[0] if doc_or_cell.paragraphs else doc_or_cell.add_paragraph()
+        p = doc_or_cell.add_paragraph()
+    p.paragraph_format.space_before = Pt(space_before)
+    p.paragraph_format.space_after  = Pt(space_after)
+    if align:
+        p.alignment = align
+    if text:
+        run = p.add_run(text)
+        run.bold   = bold
+        run.italic = italic
+        run.font.size = Pt(size)
+        if color:
+            run.font.color.rgb = RGBColor(*bytes.fromhex(color))
+    return p
+
+def section_heading(doc, text, color="2E75B6"):
+    p   = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(8)
+    p.paragraph_format.space_after  = Pt(4)
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'),   'single')
+    bottom.set(qn('w:sz'),    '6')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), color)
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+    run = p.add_run(text.upper())
+    run.bold = True
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor(*bytes.fromhex(color))
+    return p
+
+def bullet_para(doc, text, size=9.5):
+    p = doc.add_paragraph(style='List Bullet')
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after  = Pt(2)
+    run = p.add_run(text.lstrip('•-– '))
+    run.font.size = Pt(size)
+    return p
+
+# ─────────────────────────────────────────────
+# BUILD RESUME DOCX
+# ─────────────────────────────────────────────
+
+def build_resume(data, watermark=False):
+    doc = Document()
+
+    # Page margins
+    for section in doc.sections:
+        section.top_margin    = Cm(1.5)
+        section.bottom_margin = Cm(1.5)
+        section.left_margin   = Cm(1.8)
+        section.right_margin  = Cm(1.8)
+
+    # Default font
+    doc.styles['Normal'].font.name = 'Calibri'
+    doc.styles['Normal'].font.size = Pt(10)
+
+    # ── Watermark header ──
+    if watermark:
+        hdr = doc.sections[0].header
+        hp  = hdr.paragraphs[0]
+        hp.clear()
+        run = hp.add_run("⚡ FREE VERSION — UPGRADE AT CVNIXO.STREAMLIT.APP FOR CLEAN COPY")
+        run.font.size  = Pt(7)
+        run.font.color.rgb = RGBColor(0x9B, 0x59, 0xB6)
+        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # ── Name banner ──
+    name_tbl = doc.add_table(rows=1, cols=1)
+    name_tbl.style = 'Table Grid'
+    cell = name_tbl.cell(0, 0)
+    set_cell_bg(cell, '1A1A2E')
+    set_cell_borders(cell, top='nil', bottom='nil', left='nil', right='nil')
+    cell.paragraphs[0].clear()
+
+    np = cell.paragraphs[0]
+    nr = np.add_run((data.get('candidate_name') or 'Candidate').upper())
+    nr.bold = True
+    nr.font.size = Pt(18)
+    nr.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    np.paragraph_format.space_before = Pt(8)
+    np.paragraph_format.space_after  = Pt(2)
+
+    contact_parts = [x for x in [
+        data.get('email'), data.get('phone'),
+        data.get('location'), data.get('linkedin')
+    ] if x]
+    cp = cell.add_paragraph("   |   ".join(contact_parts))
+    cp.runs[0].font.size = Pt(8)
+    cp.runs[0].font.color.rgb = RGBColor(0xA0, 0xC4, 0xFF)
+    cp.paragraph_format.space_before = Pt(0)
+    cp.paragraph_format.space_after  = Pt(8)
+
+    doc.add_paragraph()
+
+    # ── Summary ──
+    if data.get('summary'):
+        section_heading(doc, 'Professional Summary')
+        p = doc.add_paragraph(data['summary'])
+        p.runs[0].italic = True
+        p.runs[0].font.size = Pt(9.5)
+        p.paragraph_format.space_after = Pt(4)
+
+    # ── Work Experience ──
+    jobs = data.get('work_experience', [])
+    if jobs:
+        section_heading(doc, 'Work Experience')
+        for job in jobs:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_after  = Pt(1)
+            r1 = p.add_run(job.get('title', ''))
+            r1.bold = True
+            r1.font.size = Pt(10)
+            r2 = p.add_run(f"  ·  {job.get('company', '')}")
+            r2.bold = True
+            r2.font.size = Pt(10)
+            r2.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+            r3 = p.add_run(f"  ·  {job.get('dates', '')}  ·  {job.get('location', '')}")
+            r3.italic = True
+            r3.font.size = Pt(8.5)
+            r3.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+            for b in job.get('bullets', [])[:3]:
+                bullet_para(doc, b)
+
+    # ── Projects ──
+    projects = data.get('projects', [])
+    if projects:
+        section_heading(doc, 'Projects')
+        for proj in projects[:2]:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_after  = Pt(1)
+            r = p.add_run(proj.get('name', ''))
+            r.bold = True
+            r.font.size = Pt(10)
+            r.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+            for b in proj.get('bullets', [])[:2]:
+                bullet_para(doc, b)
+
+    # ── Skills ──
+    tech  = data.get('skills_technical', [])
+    tools = data.get('skills_tools', [])
+    if tech or tools:
+        section_heading(doc, 'Skills')
+        skills_tbl = doc.add_table(rows=1, cols=2)
+        skills_tbl.style = 'Table Grid'
+        w = skills_tbl.columns[0].width
+
+        lc = skills_tbl.cell(0, 0)
+        rc = skills_tbl.cell(0, 1)
+        set_cell_bg(lc, 'F5F7FA')
+        set_cell_bg(rc, 'F5F7FA')
+        set_cell_borders(lc, top='nil', bottom='nil', left='nil', right='nil')
+        set_cell_borders(rc, top='nil', bottom='nil', left='nil', right='nil')
+
+        lc.paragraphs[0].clear()
+        lp = lc.paragraphs[0]
+        lr = lp.add_run('Technical Skills')
+        lr.bold = True
+        lr.font.size = Pt(9)
+        lr.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+        lp2 = lc.add_paragraph("  •  ".join(tech))
+        lp2.runs[0].font.size = Pt(9)
+
+        rc.paragraphs[0].clear()
+        rp = rc.paragraphs[0]
+        rr = rp.add_run('Tools & Technologies')
+        rr.bold = True
+        rr.font.size = Pt(9)
+        rr.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+        rp2 = rc.add_paragraph("  •  ".join(tools))
+        rp2.runs[0].font.size = Pt(9)
+
+    # ── Education ──
+    edu = data.get('education', [])
+    if edu:
+        section_heading(doc, 'Education')
+        for e in edu:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(3)
+            p.paragraph_format.space_after  = Pt(2)
+            r1 = p.add_run(e.get('degree', ''))
+            r1.bold = True
+            r1.font.size = Pt(10)
+            extra = f"  ·  {e.get('institution', '')}  ·  {e.get('year', '')}"
+            if e.get('cgpa'):
+                extra += f"  ·  CGPA: {e['cgpa']}"
+            r2 = p.add_run(extra)
+            r2.font.size = Pt(9)
+            r2.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    # ── Achievements ──
+    ach = data.get('achievements', [])
+    if ach:
+        section_heading(doc, 'Achievements')
+        for a in ach[:3]:
+            bullet_para(doc, a)
+
+    # ── Certifications ──
+    certs = data.get('certifications', [])
+    if certs:
+        section_heading(doc, 'Certifications')
+        for c in certs[:3]:
+            bullet_para(doc, c)
+
+    # ── Footer ──
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    top = OxmlElement('w:top')
+    top.set(qn('w:val'),   'single')
+    top.set(qn('w:sz'),    '2')
+    top.set(qn('w:space'), '1')
+    top.set(qn('w:color'), 'D0D8E8')
+    pBdr.append(top)
+    pPr.append(pBdr)
+    run = p.add_run("Tailored with Cvnixo  •  AI Resume Tool")
+    run.italic = True
+    run.font.size = Pt(7.5)
+    run.font.color.rgb = RGBColor(0xAA, 0xAA, 0xAA)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ─────────────────────────────────────────────
+# BUILD ANALYSIS DOCX
+# ─────────────────────────────────────────────
+
+def build_analysis(data):
+    doc = Document()
+
+    for section in doc.sections:
+        section.top_margin    = Cm(1.5)
+        section.bottom_margin = Cm(1.5)
+        section.left_margin   = Cm(1.8)
+        section.right_margin  = Cm(1.8)
+
+    doc.styles['Normal'].font.name = 'Calibri'
+    doc.styles['Normal'].font.size = Pt(10)
+
+    score = max(5, int(data.get('match_score') or 0))
+
+    if score >= 70:
+        sc, sl = '00A651', 'STRONG MATCH — Ready to apply!'
+    elif score >= 40:
+        sc, sl = 'E67E22', 'MODERATE MATCH — Few improvements needed'
+    else:
+        sc, sl = 'C0392B', 'KEEP BUILDING — Focus on missing skills first'
+
+    # ── Banner ──
+    tbl = doc.add_table(rows=1, cols=1)
+    tbl.style = 'Table Grid'
+    cell = tbl.cell(0, 0)
+    set_cell_bg(cell, '1B4F72')
+    set_cell_borders(cell, top='nil', bottom='nil', left='nil', right='nil')
+
+    cell.paragraphs[0].clear()
+    bp = cell.paragraphs[0]
+    bp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    br1 = bp.add_run("CVNIXO")
+    br1.bold = True
+    br1.font.size = Pt(18)
+    br1.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    br2 = bp.add_run("  ·  ATS RESUME ANALYSIS REPORT")
+    br2.font.size = Pt(11)
+    br2.font.color.rgb = RGBColor(0x90, 0xC4, 0xF0)
+    bp.paragraph_format.space_before = Pt(8)
+    bp.paragraph_format.space_after  = Pt(2)
+
+    cp = cell.add_paragraph(f"Candidate: {data.get('candidate_name', '')}")
+    cp.runs[0].italic = True
+    cp.runs[0].font.size = Pt(9)
+    cp.runs[0].font.color.rgb = RGBColor(0xC8, 0xDF, 0xF5)
+    cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cp.paragraph_format.space_after = Pt(8)
+
+    doc.add_paragraph()
+
+    # ── Score card ──
+    stbl = doc.add_table(rows=1, cols=2)
+    stbl.style = 'Table Grid'
+
+    lc = stbl.cell(0, 0)
+    rc = stbl.cell(0, 1)
+    set_cell_bg(lc, 'F5F7FA')
+    set_cell_bg(rc, 'FFFFFF')
+    set_cell_borders(lc, top='nil', bottom='nil', left='nil', right='nil')
+    set_cell_borders(rc, top='nil', bottom='nil', left='nil', right='nil')
+
+    lc.paragraphs[0].clear()
+    sp = lc.paragraphs[0]
+    sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sr = sp.add_run(f"{score}%")
+    sr.bold = True
+    sr.font.size = Pt(36)
+    sr.font.color.rgb = RGBColor(*bytes.fromhex(sc))
+    sp.paragraph_format.space_before = Pt(10)
+    sp.paragraph_format.space_after  = Pt(2)
+
+    lp2 = lc.add_paragraph("ATS MATCH SCORE")
+    lp2.runs[0].bold = True
+    lp2.runs[0].font.size = Pt(7.5)
+    lp2.runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    lp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    lp3 = lc.add_paragraph(sl)
+    lp3.runs[0].bold = True
+    lp3.runs[0].font.size = Pt(8.5)
+    lp3.runs[0].font.color.rgb = RGBColor(*bytes.fromhex(sc))
+    lp3.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lp3.paragraph_format.space_after = Pt(10)
+
+    rc.paragraphs[0].clear()
+    rp = rc.paragraphs[0]
+    rp.paragraph_format.space_before = Pt(10)
+    rr1 = rp.add_run(f"Keywords Found: {data.get('ats_keywords_found', '?')}     ")
+    rr1.bold = True
+    rr1.font.size = Pt(9)
+    rr1.font.color.rgb = RGBColor(0x00, 0xA6, 0x51)
+    rr2 = rp.add_run(f"Keywords Missing: {data.get('ats_keywords_missing', '?')}")
+    rr2.bold = True
+    rr2.font.size = Pt(9)
+    rr2.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+    doc.add_paragraph()
+
+    # ── Strong vs Missing ──
+    section_heading(doc, 'Detailed Analysis', '1B4F72')
+    atbl = doc.add_table(rows=2, cols=2)
+    atbl.style = 'Table Grid'
+
+    hdr_l = atbl.cell(0, 0)
+    hdr_r = atbl.cell(0, 1)
+    set_cell_bg(hdr_l, 'E8F5E9')
+    set_cell_bg(hdr_r, 'FDEDEC')
+    set_cell_borders(hdr_l, top='nil', bottom='nil', left='nil', right='nil')
+    set_cell_borders(hdr_r, top='nil', bottom='nil', left='nil', right='nil')
+
+    hdr_l.paragraphs[0].clear()
+    hl = hdr_l.paragraphs[0]
+    hlr = hl.add_run("✓  WHAT MATCHES WELL")
+    hlr.bold = True
+    hlr.font.size = Pt(9.5)
+    hlr.font.color.rgb = RGBColor(0x00, 0xA6, 0x51)
+    hl.paragraph_format.space_before = Pt(6)
+    hl.paragraph_format.space_after = Pt(4)
+
+    hdr_r.paragraphs[0].clear()
+    hr = hdr_r.paragraphs[0]
+    hrr = hr.add_run("✗  NEEDS IMPROVEMENT")
+    hrr.bold = True
+    hrr.font.size = Pt(9.5)
+    hrr.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+    hr.paragraph_format.space_before = Pt(6)
+    hr.paragraph_format.space_after = Pt(4)
+
+    body_l = atbl.cell(1, 0)
+    body_r = atbl.cell(1, 1)
+    set_cell_bg(body_l, 'E8F5E9')
+    set_cell_bg(body_r, 'FDEDEC')
+    set_cell_borders(body_l, top='nil', bottom='nil', left='nil', right='nil')
+    set_cell_borders(body_r, top='nil', bottom='nil', left='nil', right='nil')
+
+    body_l.paragraphs[0].clear()
+    for pt in data.get('strong_points', []):
+        p = body_l.add_paragraph(f"• {pt.lstrip('•- ')}")
+        p.runs[0].font.size = Pt(9)
+        p.paragraph_format.space_after = Pt(3)
+
+    body_r.paragraphs[0].clear()
+    for ms in data.get('missing_skills', []):
+        p = body_r.add_paragraph(f"• {ms.lstrip('•- ')}")
+        p.runs[0].font.size = Pt(9)
+        p.paragraph_format.space_after = Pt(3)
+
+    doc.add_paragraph()
+
+    # ── Improvement Roadmap ──
+    section_heading(doc, 'Improvement Roadmap', 'E67E22')
+    for i, tip in enumerate(data.get('improvement_tips', []), 1):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(4)
+        r1 = p.add_run(f"{i}.  ")
+        r1.bold = True
+        r1.font.size = Pt(9.5)
+        r1.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
+        r2 = p.add_run(tip)
+        r2.font.size = Pt(9.5)
+
+    # ── Footer ──
+    doc.add_paragraph()
+    p = doc.add_paragraph("Generated by Cvnixo  •  AI Resume Tailoring Tool")
+    p.runs[0].italic = True
+    p.runs[0].font.size = Pt(7.5)
+    p.runs[0].font.color.rgb = RGBColor(0xAA, 0xAA, 0xAA)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
 # ─────────────────────────────────────────────
@@ -322,8 +741,7 @@ def simple_ats_score(resume_text, jd_text):
 defaults = {
     "step": 1, "resume_text": None, "jd_text": None,
     "ai_data": None, "ats_before": None, "ats_after": None,
-    "missing_kw": [], "plan": None, "email": None,
-    "resume_bytes": None, "analysis_bytes": None
+    "plan": None, "email": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -343,7 +761,7 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# STEP 1 — RESUME UPLOAD
+# STEP 1 — RESUME
 # ─────────────────────────────────────────────
 st.markdown('<div class="card"><div class="card-title"><span class="step-num">1</span> Upload Your Resume (PDF)</div>', unsafe_allow_html=True)
 resume_file = st.file_uploader("Resume", type=["pdf"], label_visibility="collapsed")
@@ -356,15 +774,12 @@ if resume_file:
 
 
 # ─────────────────────────────────────────────
-# STEP 2 — JOB DESCRIPTION
+# STEP 2 — JD
 # ─────────────────────────────────────────────
 st.markdown('<div class="card"><div class="card-title"><span class="step-num">2</span> Add the Job Description</div>', unsafe_allow_html=True)
-
-jd_method = st.radio(
-    "JD method",
+jd_method = st.radio("JD method",
     ["Paste job link (LinkedIn / Naukri / Indeed / any)", "Paste JD text directly"],
-    label_visibility="collapsed", horizontal=True
-)
+    label_visibility="collapsed", horizontal=True)
 
 if "link" in jd_method.lower():
     job_url = st.text_input("Job URL", placeholder="https://linkedin.com/jobs/view/...", label_visibility="collapsed")
@@ -381,7 +796,6 @@ else:
         placeholder="Paste the complete job description here...", label_visibility="collapsed")
     if jd_raw:
         st.session_state.jd_text = jd_raw
-
 st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -404,9 +818,7 @@ if go:
         st.warning("This email has already used the free tier. Upgrade below to continue.")
         st.session_state.step = 2
     else:
-        before, missing = simple_ats_score(st.session_state.resume_text, st.session_state.jd_text)
-        st.session_state.ats_before = before
-        st.session_state.missing_kw = missing
+        st.session_state.ats_before = simple_ats_score(st.session_state.resume_text, st.session_state.jd_text)
 
         with st.spinner("AI is analysing and tailoring your resume..."):
             raw = call_groq(st.session_state.resume_text, st.session_state.jd_text)
@@ -414,18 +826,17 @@ if go:
         try:
             data = parse_json(raw)
         except Exception as e:
-            st.error(f"Parsing error: {e}. Please try again.")
+            st.error(f"Parsing error — please try again.")
             st.stop()
 
-        st.session_state.ai_data = data
-        after, _ = simple_ats_score(
-            " ".join(data.get("skills_technical", []) + data.get("skills_tools", []) +
-                     [b for job in data.get("work_experience",[]) for b in job.get("bullets",[])] +
-                     [data.get("summary","")]),
-            st.session_state.jd_text
+        st.session_state.ai_data   = data
+        tailored_text = " ".join(
+            [data.get('summary', '')] +
+            [b for job in data.get('work_experience', []) for b in job.get('bullets', [])] +
+            data.get('skills_technical', []) + data.get('skills_tools', [])
         )
-        st.session_state.ats_after = after
-        st.session_state.email = email_input
+        st.session_state.ats_after = simple_ats_score(tailored_text, st.session_state.jd_text)
+        st.session_state.email     = email_input
         mark_email_used(email_input)
         st.session_state.step = 2
         st.rerun()
@@ -456,52 +867,36 @@ if st.session_state.step >= 2 and st.session_state.ai_data:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.session_state.missing_kw:
-        chips = "".join(f'<span class="chip miss">{w}</span>' for w in st.session_state.missing_kw)
-        st.markdown(f'<div class="card"><div class="card-title">🎯 Keywords Added</div>{chips}</div>', unsafe_allow_html=True)
-
-    # ── FREE DOWNLOAD — generate docs via Node ──
     data = st.session_state.ai_data
-    out_dir = tempfile.mkdtemp()
-    with st.spinner("Building your documents..."):
-        ok, err = run_node(data, out_dir)
 
-    resume_path   = os.path.join(out_dir, "cvnixo_resume.docx")
-    analysis_path = os.path.join(out_dir, "cvnixo_analysis.docx")
-
-    if ok and os.path.exists(resume_path):
-        with open(resume_path, "rb") as f:
-            st.session_state.resume_bytes = f.read()
-        if os.path.exists(analysis_path):
-            with open(analysis_path, "rb") as f:
-                st.session_state.analysis_bytes = f.read()
-
-        st.markdown("""
-        <div class="card" style="border-color:#6c63ff33">
-            <div class="card-title">✅ Your Documents Are Ready</div>
-            <div style="color:var(--muted);font-size:13px">
-                Free version includes watermark. Upgrade below for clean copy + more.
-            </div>
+    st.markdown("""
+    <div class="card" style="border-color:#6c63ff33">
+        <div class="card-title">✅ Your Documents Are Ready — Download Below</div>
+        <div style="color:var(--muted);font-size:13px">
+            Free version has a small watermark. Upgrade for clean copy + cover letter + interview kit.
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                "⬇ Download Resume (Free)",
-                data=st.session_state.resume_bytes,
-                file_name="cvnixo_resume_free.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-        with col2:
-            st.download_button(
-                "⬇ Download ATS Report (Free)",
-                data=st.session_state.analysis_bytes or b"",
-                file_name="cvnixo_analysis_free.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-    else:
-        st.warning("Document generation needs Node.js on the server. Your AI analysis is complete — upgrade to get your documents.")
+    # Generate docs
+    resume_bytes   = build_resume(data, watermark=True)
+    analysis_bytes = build_analysis(data)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "⬇ Download Tailored Resume (Free)",
+            data=resume_bytes,
+            file_name="cvnixo_resume_free.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    with col2:
+        st.download_button(
+            "⬇ Download ATS Report (Free)",
+            data=analysis_bytes,
+            file_name="cvnixo_ats_report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
 
     # ── PRICING ──
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -551,7 +946,7 @@ if st.session_state.step >= 2 and st.session_state.ai_data:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── UNLOCK AFTER PAYMENT ──
+    # ── UNLOCK ──
     st.markdown("""
     <div class="unlock-box">
         <div class="card-title">✅ Already Paid? Enter Transaction ID to Unlock</div>
@@ -561,9 +956,9 @@ if st.session_state.step >= 2 and st.session_state.ai_data:
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns([3,1])
+    c1, c2 = st.columns([3, 1])
     with c1:
-        txn = st.text_input("Transaction ID from UPI / Razorpay", placeholder="e.g. pay_Pxxxxxxxxxxxxxx or UPI ref number", label_visibility="collapsed")
+        txn = st.text_input("Transaction ID", placeholder="UPI ref number or Razorpay payment ID", label_visibility="collapsed")
     with c2:
         plan = st.selectbox("Plan", ["Basic ₹99", "Pro ₹499", "Yearly ₹2999"], label_visibility="collapsed")
 
@@ -577,88 +972,87 @@ if st.session_state.step >= 2 and st.session_state.ai_data:
 
 
 # ─────────────────────────────────────────────
-# UNLOCKED CONTENT
+# UNLOCKED
 # ─────────────────────────────────────────────
 if st.session_state.step == 3 and st.session_state.ai_data:
 
-    plan = st.session_state.plan or ""
+    plan      = st.session_state.plan or ""
     is_pro    = "Pro" in plan or "Yearly" in plan
     is_yearly = "Yearly" in plan
+    data      = st.session_state.ai_data
 
-    st.success(f"🎉 {plan} unlocked! Your files are ready below.")
+    st.success(f"🎉 {plan} unlocked! Download your files below.")
 
-    if st.session_state.resume_bytes:
-        st.download_button(
-            "⬇ Download Clean Resume (No Watermark)",
-            data=st.session_state.resume_bytes,
-            file_name="cvnixo_tailored_resume.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+    # Clean resume
+    clean_bytes = build_resume(data, watermark=False)
+    st.download_button(
+        "⬇ Download Clean Resume (No Watermark)",
+        data=clean_bytes,
+        file_name="cvnixo_tailored_resume.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 
     if is_pro:
-        data = st.session_state.ai_data
-        tabs = st.tabs(["📝 Cover Letter", "🎯 Interview Kit", "💼 LinkedIn" if is_yearly else "💼 LinkedIn (Yearly only)"])
+        client = groq.Groq(api_key=GROQ_API_KEY)
+        tabs = st.tabs(["📝 Cover Letter", "🎯 Interview Kit",
+                        "💼 LinkedIn" if is_yearly else "💼 LinkedIn (Yearly only)"])
 
         with tabs[0]:
-            client = groq.Groq(api_key=GROQ_API_KEY)
             with st.spinner("Writing cover letter..."):
-                cl_resp = client.chat.completions.create(
+                cl = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[{"role":"user","content":f"""
-Write a compelling cover letter for this candidate applying to this role.
-3 paragraphs. Professional but human. No generic openers.
+Write a compelling, personalized cover letter. 3 paragraphs. Professional but human tone. No generic openers like "I am writing to express".
 Candidate summary: {data.get('summary','')}
 Strong points: {', '.join(data.get('strong_points',[]))}
-Job context from resume: {st.session_state.jd_text[:800]}
+Role context: {st.session_state.jd_text[:800] if st.session_state.jd_text else ''}
 """}],
-                    temperature=0.6, max_tokens=800
+                    temperature=0.6, max_tokens=700
                 )
-            cover = cl_resp.choices[0].message.content
-            st.text_area("Cover Letter", cover, height=300)
+            cover = cl.choices[0].message.content
+            st.text_area("Cover Letter", cover, height=280)
             st.download_button("⬇ Download Cover Letter", data=cover, file_name="cvnixo_cover_letter.txt", mime="text/plain")
 
         with tabs[1]:
             with st.spinner("Building interview kit..."):
-                ik_resp = client.chat.completions.create(
+                ik = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[{"role":"user","content":f"""
-Create an interview prep kit.
-Include:
-1. TOP 5 LIKELY QUESTIONS with brief answer hints based on the resume
+Create an interview prep kit with:
+1. TOP 5 LIKELY INTERVIEW QUESTIONS with brief answer hints based on the resume
 2. 3 SMART QUESTIONS TO ASK THE INTERVIEWER
-3. KEY SKILLS TO HIGHLIGHT
+3. KEY SKILLS TO HIGHLIGHT IN THE INTERVIEW
 
 Strong points: {', '.join(data.get('strong_points',[]))}
 Missing skills: {', '.join(data.get('missing_skills',[]))}
-JD context: {st.session_state.jd_text[:800]}
+Role context: {st.session_state.jd_text[:800] if st.session_state.jd_text else ''}
 """}],
-                    temperature=0.5, max_tokens=1000
+                    temperature=0.5, max_tokens=900
                 )
-            kit = ik_resp.choices[0].message.content
+            kit = ik.choices[0].message.content
             st.text_area("Interview Kit", kit, height=350)
             st.download_button("⬇ Download Interview Kit", data=kit, file_name="cvnixo_interview_kit.txt", mime="text/plain")
 
         with tabs[2]:
             if is_yearly:
                 with st.spinner("Rewriting LinkedIn profile..."):
-                    li_resp = client.chat.completions.create(
+                    li = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
                         messages=[{"role":"user","content":f"""
-Rewrite this person's LinkedIn profile.
-Provide:
-1. HEADLINE (120 chars max, keyword-rich)
-2. ABOUT SECTION (first-person, engaging, 2000 chars max)
-3. TOP 5 SKILLS TO ADD
+Rewrite this person's LinkedIn profile. Provide:
+1. HEADLINE (120 chars max, keyword-rich, compelling)
+2. ABOUT SECTION (first-person, engaging, 1500-2000 chars)
+3. TOP 5 SKILLS TO ADD ON LINKEDIN
 
-Resume summary: {data.get('summary','')}
+Summary: {data.get('summary','')}
 Technical skills: {', '.join(data.get('skills_technical',[]))}
 Experience: {', '.join([j.get('title','') + ' at ' + j.get('company','') for j in data.get('work_experience',[])])}
 """}],
                         temperature=0.6, max_tokens=900
                     )
-                li = li_resp.choices[0].message.content
-                st.text_area("LinkedIn Rewrite", li, height=350)
-                st.download_button("⬇ Download LinkedIn Rewrite", data=li, file_name="cvnixo_linkedin.txt", mime="text/plain")
+                linkedin = li.choices[0].message.content
+                st.text_area("LinkedIn Rewrite", linkedin, height=350)
+                st.download_button("⬇ Download LinkedIn Rewrite", data=linkedin, file_name="cvnixo_linkedin.txt", mime="text/plain")
             else:
                 st.info("LinkedIn Profile Rewrite is available in the Yearly plan (₹2999). Upgrade to unlock.")
 
