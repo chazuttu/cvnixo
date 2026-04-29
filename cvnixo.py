@@ -6,7 +6,8 @@ import subprocess
 import shutil
 
 # ── Your Groq API key ─────────────────────────────────────────────────────
-API_KEY = "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"
+import streamlit as st
+api_key = st.secrets["GROQ_API_KEY"]
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 JS_FILE = r"C:\Users\HP\Desktop\generate_resume.js"
